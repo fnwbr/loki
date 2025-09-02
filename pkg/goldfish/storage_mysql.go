@@ -199,97 +199,10 @@ func (s *MySQLStorage) GetSampledQueries(ctx context.Context, page, pageSize int
 		pageSize = 20 // Default page size
 	}
 	
-	// Add partition pruning hint - query only recent partitions by default
-	// With 6-hour partitions, we can be very aggressive
-	// Most UI queries only need very recent data
-	partitionPruneHours := 24 * time.Hour // Default to last 24 hours (4 partitions)
-	
-	// For filtered queries that might have less data, look back a bit further
-	if filter.Outcome != "" && filter.Outcome != OutcomeAll {
-		partitionPruneHours = 48 * time.Hour // 8 partitions
-	}
-	
-	// If user or tenant filter is very specific, might need more history
-	if filter.Tenant != "" || filter.User != "" {
-		partitionPruneHours = 72 * time.Hour // 12 partitions
-	}
-	
-	partitionHint := time.Now().Add(-partitionPruneHours)
-	
-	// Log partition pruning for metrics
-	level.Debug(s.logger).Log(
-		"msg", "partition pruning active",
-		"hours_back", partitionPruneHours.Hours(),
-		"partitions_scanned", int(partitionPruneHours.Hours()/6),
-		"filter", fmt.Sprintf("%+v", filter),
-	)
-
-	// Validate outcome parameter against allowed values
-	outcome := filter.Outcome
-	switch outcome {
-	case OutcomeAll, OutcomeMatch, OutcomeMismatch, OutcomeError:
-		// Valid values - proceed
-	default:
-		outcome = OutcomeAll // Default to all if invalid
-	}
-
 	offset := (page - 1) * pageSize
 
-	// Build WHERE clause for tenant/user/engine filters with partition pruning
-	whereClause, whereArgs := buildWhereClauseWithPartitionPruning(filter, partitionHint)
-
-	// Build HAVING clause based on outcome filter
-	// Using HAVING clause to filter on computed status without subqueries
-	var havingClause string
-	var queryArgs []any
-
-	// Add WHERE args first
-	queryArgs = append(queryArgs, whereArgs...)
-
-	if outcome != OutcomeAll {
-		havingClause = `HAVING comparison_status = ?`
-		queryArgs = append(queryArgs, outcome)
-	}
-
-	// Get total count with filtering - optimized with direct count
-	// Use a simpler COUNT query when no outcome filter is applied
-	var total int
-	var countQuery string
-	
-	if outcome == OutcomeAll {
-		// Simple count without subquery when no outcome filtering
-		countQuery = `SELECT COUNT(*) FROM sampled_queries sq ` + whereClause
-	} else {
-		// Need subquery only when filtering by outcome
-		countQuery = `
-			SELECT COUNT(*) FROM (
-				SELECT 
-					sq.correlation_id,
-					CASE
-						WHEN co.comparison_status IS NOT NULL THEN co.comparison_status
-						WHEN (sq.cell_a_status_code NOT BETWEEN 200 AND 299 OR sq.cell_b_status_code NOT BETWEEN 200 AND 299) THEN 'error'
-						WHEN sq.cell_a_response_hash = sq.cell_b_response_hash THEN 'match'
-						ELSE 'mismatch'
-					END as comparison_status
-				FROM sampled_queries sq USE INDEX (idx_sampled_queries_filter_composite)
-				LEFT JOIN comparison_outcomes co USE INDEX (idx_comparison_outcomes_correlation_status) 
-					ON sq.correlation_id = co.correlation_id
-				` + whereClause + `
-				` + havingClause + `
-			) as filtered
-		`
-	}
-
-	// Debug logging
-	level.Debug(s.logger).Log("ui-component", "goldfish", "msg", "executing count query", "query", countQuery, "args", queryArgs)
-
-	err := s.db.QueryRowContext(ctx, countQuery, queryArgs...).Scan(&total)
-	if err != nil {
-		level.Error(s.logger).Log("ui-component", "goldfish", "msg", "count query failed", "err", err)
-		return nil, err
-	}
-
-	level.Debug(s.logger).Log("ui-component", "goldfish", "msg", "count query result", "total", total)
+	// Build WHERE clause for tenant/user/engine/time filters
+	whereClause, whereArgs := buildWhereClause(filter)
 
 	// Get paginated results - optimized query with proper index hints
 	// Use filter_composite index when filters are present, otherwise use sampled_at_desc
@@ -320,13 +233,13 @@ func (s *MySQLStorage) GetSampledQueries(ctx context.Context, page, pageSize int
 		LEFT JOIN comparison_outcomes co USE INDEX (idx_comparison_outcomes_correlation_status)
 			ON sq.correlation_id = co.correlation_id
 		` + whereClause + `
-		` + havingClause + `
 		ORDER BY sq.sampled_at DESC 
 		LIMIT ? OFFSET ?
 	`
 
-	// Add pagination parameters to queryArgs
-	queryArgs = append(queryArgs, pageSize, offset)
+	// Fetch one extra record to determine if there are more pages
+	// We'll fetch pageSize+1 records, then check if we got more than pageSize
+	queryArgs := append(whereArgs, pageSize+1, offset)
 
 	// Debug logging
 	level.Debug(s.logger).Log("ui-component", "goldfish", "msg", "executing main query", "query", query, "args", queryArgs)
@@ -382,9 +295,17 @@ func (s *MySQLStorage) GetSampledQueries(ctx context.Context, page, pageSize int
 		return nil, err
 	}
 
+	// Check if we have more records than requested
+	hasMore := false
+	if len(queries) > pageSize {
+		hasMore = true
+		// Trim the result to the requested page size
+		queries = queries[:pageSize]
+	}
+
 	return &APIResponse{
 		Queries:  queries,
-		Total:    total,
+		HasMore:  hasMore,
 		Page:     page,
 		PageSize: pageSize,
 	}, nil
@@ -399,6 +320,33 @@ func (s *MySQLStorage) Close() error {
 func buildWhereClause(filter QueryFilter) (string, []any) {
 	var conditions []string
 	var args []any
+
+	// Add time range filters
+	if !filter.From.IsZero() {
+		conditions = append(conditions, "sq.sampled_at >= ?")
+		args = append(args, filter.From)
+	}
+
+	if !filter.To.IsZero() {
+		conditions = append(conditions, "sq.sampled_at <= ?")
+		args = append(args, filter.To)
+	}
+
+	// Add outcome filter using WHERE clause instead of HAVING
+	// This improves performance by filtering rows before aggregation
+	switch filter.Outcome {
+	case OutcomeMatch:
+		// Both cells returned success (2xx) and have matching response hashes
+		conditions = append(conditions, "(sq.cell_a_status_code >= 200 AND sq.cell_a_status_code < 300 AND sq.cell_b_status_code >= 200 AND sq.cell_b_status_code < 300 AND sq.cell_a_response_hash = sq.cell_b_response_hash)")
+	case OutcomeMismatch:
+		// Both cells returned success (2xx) but have different response hashes
+		conditions = append(conditions, "(sq.cell_a_status_code >= 200 AND sq.cell_a_status_code < 300 AND sq.cell_b_status_code >= 200 AND sq.cell_b_status_code < 300 AND sq.cell_a_response_hash != sq.cell_b_response_hash)")
+	case OutcomeError:
+		// At least one cell returned an error (non-2xx)
+		conditions = append(conditions, "(sq.cell_a_status_code < 200 OR sq.cell_a_status_code >= 300 OR sq.cell_b_status_code < 200 OR sq.cell_b_status_code >= 300)")
+	case OutcomeAll:
+		// No filtering - include all results
+	}
 
 	// Add tenant filter
 	if filter.Tenant != "" {

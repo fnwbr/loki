@@ -121,7 +121,7 @@ type ComparisonOutcome struct {
 // GoldfishAPIResponse represents the paginated API response
 type GoldfishAPIResponse struct {
 	Queries  []SampledQuery `json:"queries"`
-	Total    int            `json:"total"`
+	HasMore  bool           `json:"hasMore"`
 	Page     int            `json:"page"`
 	PageSize int            `json:"pageSize"`
 }
@@ -144,6 +144,23 @@ func (s *Service) GetSampledQueriesWithContext(ctx context.Context, page, pageSi
 		return nil, ErrGoldfishNotConfigured
 	}
 
+	// Apply time range defaults and validation
+	// Check if only one time bound is specified (invalid state)
+	fromIsZero := filter.From.IsZero()
+	toIsZero := filter.To.IsZero()
+
+	if fromIsZero != toIsZero {
+		// One is set but not the other - this is an error
+		return nil, fmt.Errorf("both From and To must be specified, or neither")
+	}
+
+	// If both are zero, apply defaults (last hour)
+	if fromIsZero && toIsZero {
+		now := s.now()
+		filter.To = now
+		filter.From = now.Add(-time.Hour)
+	}
+
 	// Log the query with trace context
 	if traceID != "" {
 		level.Debug(s.logger).Log(
@@ -156,7 +173,7 @@ func (s *Service) GetSampledQueriesWithContext(ctx context.Context, page, pageSi
 	}
 
 	// Call the storage layer with context and track metrics
-	queryStart := time.Now()
+	queryStart := s.now()
 	resp, err := s.goldfishStorage.GetSampledQueries(ctx, page, pageSize, filter)
 	queryDuration := time.Since(queryStart).Seconds()
 
@@ -301,7 +318,7 @@ func (s *Service) GetSampledQueriesWithContext(ctx context.Context, page, pageSi
 
 	return &GoldfishAPIResponse{
 		Queries:  queries,
-		Total:    resp.Total,
+		HasMore:  resp.HasMore,
 		Page:     resp.Page,
 		PageSize: resp.PageSize,
 	}, nil

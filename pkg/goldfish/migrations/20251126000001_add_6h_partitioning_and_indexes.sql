@@ -2,10 +2,10 @@
 -- Add 6-hour partitioning and performance indexes for goldfish query optimization
 
 -- First, add all the missing indexes
-CREATE INDEX IF NOT EXISTS idx_sampled_queries_user ON sampled_queries(user);
+CREATE INDEX idx_sampled_queries_user ON sampled_queries(user);
 
 -- Composite index for the JOIN operation with comparison_outcomes
-CREATE INDEX IF NOT EXISTS idx_sampled_queries_correlation_composite ON sampled_queries(
+CREATE INDEX idx_sampled_queries_correlation_composite ON sampled_queries(
     correlation_id,
     cell_a_status_code,
     cell_b_status_code,
@@ -14,7 +14,7 @@ CREATE INDEX IF NOT EXISTS idx_sampled_queries_correlation_composite ON sampled_
 );
 
 -- Composite index for filtering queries with WHERE and HAVING clauses
-CREATE INDEX IF NOT EXISTS idx_sampled_queries_filter_composite ON sampled_queries(
+CREATE INDEX idx_sampled_queries_filter_composite ON sampled_queries(
     tenant_id,
     user,
     sampled_at DESC,
@@ -22,14 +22,14 @@ CREATE INDEX IF NOT EXISTS idx_sampled_queries_filter_composite ON sampled_queri
 );
 
 -- Index for new engine filtering
-CREATE INDEX IF NOT EXISTS idx_sampled_queries_engine_filter ON sampled_queries(
+CREATE INDEX idx_sampled_queries_engine_filter ON sampled_queries(
     cell_a_used_new_engine,
     cell_b_used_new_engine,
     sampled_at DESC
 );
 
 -- Index for comparison_outcomes join performance
-CREATE INDEX IF NOT EXISTS idx_comparison_outcomes_correlation_status ON comparison_outcomes(
+CREATE INDEX idx_comparison_outcomes_correlation_status ON comparison_outcomes(
     correlation_id, 
     comparison_status
 );
@@ -59,7 +59,7 @@ PARTITION BY RANGE (UNIX_TIMESTAMP(sampled_at)) (
 -- Create stored procedure for automatic 6-hour partition management
 DELIMITER //
 
-CREATE PROCEDURE IF NOT EXISTS manage_sampled_queries_partitions_6h()
+CREATE PROCEDURE manage_sampled_queries_partitions_6h()
 BEGIN
     DECLARE next_partition_time DATETIME;
     DECLARE partition_name VARCHAR(64);
@@ -137,29 +137,29 @@ DELIMITER ;
 
 -- Create an event to run partition management every hour
 -- This ensures we always have partitions ready before data arrives
-CREATE EVENT IF NOT EXISTS manage_goldfish_partitions_6h
+CREATE EVENT manage_goldfish_partitions_6h
 ON SCHEDULE EVERY 1 HOUR
 STARTS DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 HOUR), '%Y-%m-%d %H:00:00')
 DO CALL manage_sampled_queries_partitions_6h();
 
 -- Index optimized for partition pruning with UNIX_TIMESTAMP
-CREATE INDEX IF NOT EXISTS idx_sampled_queries_unix_timestamp 
+CREATE INDEX idx_sampled_queries_unix_timestamp 
 ON sampled_queries(sampled_at, correlation_id);
 
 -- +goose Down
 -- Remove partitioning and indexes
 
 -- Drop the event and stored procedure
-DROP EVENT IF EXISTS manage_goldfish_partitions_6h;
-DROP PROCEDURE IF EXISTS manage_sampled_queries_partitions_6h;
+DROP EVENT manage_goldfish_partitions_6h;
+DROP PROCEDURE manage_sampled_queries_partitions_6h;
 
 -- Remove partitioning (converts back to regular table)
 ALTER TABLE sampled_queries REMOVE PARTITIONING;
 
 -- Drop all the new indexes
-DROP INDEX IF EXISTS idx_sampled_queries_unix_timestamp ON sampled_queries;
-DROP INDEX IF EXISTS idx_comparison_outcomes_correlation_status ON comparison_outcomes;
-DROP INDEX IF EXISTS idx_sampled_queries_engine_filter ON sampled_queries;
-DROP INDEX IF EXISTS idx_sampled_queries_filter_composite ON sampled_queries;
-DROP INDEX IF EXISTS idx_sampled_queries_correlation_composite ON sampled_queries;
-DROP INDEX IF EXISTS idx_sampled_queries_user ON sampled_queries;
+DROP INDEX idx_sampled_queries_unix_timestamp ON sampled_queries;
+DROP INDEX idx_comparison_outcomes_correlation_status ON comparison_outcomes;
+DROP INDEX idx_sampled_queries_engine_filter ON sampled_queries;
+DROP INDEX idx_sampled_queries_filter_composite ON sampled_queries;
+DROP INDEX idx_sampled_queries_correlation_composite ON sampled_queries;
+DROP INDEX idx_sampled_queries_user ON sampled_queries;

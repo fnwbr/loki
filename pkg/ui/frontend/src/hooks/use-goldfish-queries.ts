@@ -77,10 +77,10 @@ export function useGoldfishQueries(
     ...QUERY_OPTIONS,
   });
 
-  // Calculate total pages
-  const totalPages = useMemo(() => {
-    return mainQuery.data ? Math.ceil(mainQuery.data.total / pageSize) : 0;
-  }, [mainQuery.data, pageSize]);
+  // Check if there are more pages
+  const hasMore = useMemo(() => {
+    return mainQuery.data ? mainQuery.data.hasMore : false;
+  }, [mainQuery.data]);
 
   // Prefetch next page for main query
   useQuery({
@@ -90,7 +90,7 @@ export function useGoldfishQueries(
       if (result.error) throw result.error;
       return result.data;
     },
-    enabled: totalPages > 1 && page < totalPages,
+    enabled: hasMore && page >= 1,
     ...QUERY_OPTIONS,
   });
 
@@ -147,7 +147,7 @@ export function useGoldfishQueries(
     isLoading: mainQuery.isLoading,
     error: mainQuery.error,
     refetch: mainQuery.refetch,
-    totalPages,
+    hasMore,
     traceId: currentTraceId,
   };
 }
