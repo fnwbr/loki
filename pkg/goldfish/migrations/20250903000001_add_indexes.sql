@@ -1,7 +1,5 @@
 -- +goose Up
-
 -- Add indexes
-CREATE INDEX idx_sampled_queries_user ON sampled_queries(user);
 
 -- Composite index for the JOIN operation with comparison_outcomes
 CREATE INDEX idx_sampled_queries_correlation_composite ON sampled_queries(
@@ -48,4 +46,3 @@ DROP INDEX idx_sampled_queries_cell_a_engine_filter ON sampled_queries;
 DROP INDEX idx_sampled_queries_engine_filter_composite ON sampled_queries;
 DROP INDEX idx_sampled_queries_filter_composite ON sampled_queries;
 DROP INDEX idx_sampled_queries_correlation_composite ON sampled_queries;
-DROP INDEX idx_sampled_queries_user ON sampled_queries;
